@@ -51,6 +51,9 @@ HAZARD_URL = os.getenv(
     "ROBODOG_HAZARD_URL", "https://{}/api/robot/hazards".format(SERVER)
 ).strip()
 CAMERA_UPLOAD_URL = os.getenv("ROBODOG_CAMERA_URL", "").strip()
+CAMERA_WS_URL = os.getenv(
+    "ROBODOG_CAMERA_WS_URL", "wss://{}/ws/camera/upload".format(SERVER)
+).strip()
 TELEMETRY_URL = os.getenv(
     "ROBODOG_TELEMETRY_URL", "https://{}/api/robot/telemetry".format(SERVER)
 ).strip()
@@ -59,7 +62,10 @@ COMMAND_WS_URL = os.getenv(
 ).strip()
 ROBOT_ID = os.getenv("ROBODOG_ID", "robodog-01").strip()
 CAMERA_INDEX = int(os.getenv("ROBODOG_CAMERA_INDEX", "0"))
-CAMERA_JPEG_QUALITY = int(os.getenv("ROBODOG_CAMERA_JPEG_QUALITY", "80"))
+CAMERA_JPEG_QUALITY = int(os.getenv("ROBODOG_CAMERA_JPEG_QUALITY", "70"))
+CAMERA_FPS = float(os.getenv("ROBODOG_CAMERA_FPS", "10"))
+CAMERA_WIDTH = int(os.getenv("ROBODOG_CAMERA_WIDTH", "640"))
+CAMERA_HEIGHT = int(os.getenv("ROBODOG_CAMERA_HEIGHT", "480"))
 DISTANCE_WARNING_CM = float(os.getenv("ROBODOG_DISTANCE_WARNING_CM", "50"))
 DISTANCE_DANGER_CM = float(os.getenv("ROBODOG_DISTANCE_DANGER_CM", "20"))
 TILT_WARNING_DEG = float(os.getenv("ROBODOG_TILT_WARNING_DEG", "15"))
@@ -94,8 +100,11 @@ HAZARD = "HAZARD"
 stopping = threading.Event()
 movement_locked = threading.Event()
 hazard_report_lock = threading.Lock()
+camera_frame_lock = threading.Lock()
 runtime_lock = threading.RLock()
 event_queue = queue.Queue()
+latest_camera_frame = None
+latest_camera_frame_at = 0.0
 
 runtime_state = {
     "robotState": IDLE,
@@ -123,6 +132,22 @@ def update_runtime(**changes):
 def runtime_snapshot():
     with runtime_lock:
         return dict(runtime_state)
+
+
+def store_camera_frame(jpeg):
+    global latest_camera_frame, latest_camera_frame_at
+    with camera_frame_lock:
+        latest_camera_frame = bytes(jpeg)
+        latest_camera_frame_at = time.monotonic()
+
+
+def cached_camera_frame(max_age_seconds=5.0):
+    with camera_frame_lock:
+        if latest_camera_frame is None:
+            return None
+        if time.monotonic() - latest_camera_frame_at > max_age_seconds:
+            return None
+        return latest_camera_frame
 
 
 def queue_event(event_type, **details):
@@ -163,6 +188,10 @@ def validate_settings():
         raise ValueError("시간 관련 설정은 0보다 커야 합니다.")
     if not 1 <= CAMERA_JPEG_QUALITY <= 100:
         raise ValueError("ROBODOG_CAMERA_JPEG_QUALITY는 1~100 범위여야 합니다.")
+    if not 0 < CAMERA_FPS <= 30:
+        raise ValueError("ROBODOG_CAMERA_FPS는 0보다 크고 30 이하여야 합니다.")
+    if CAMERA_WIDTH <= 0 or CAMERA_HEIGHT <= 0:
+        raise ValueError("카메라 해상도는 0보다 커야 합니다.")
     if not 0 < DISTANCE_DANGER_CM <= DISTANCE_WARNING_CM:
         raise ValueError("거리 위험 기준은 경고 기준 이하여야 합니다.")
     if not 0 < TILT_WARNING_DEG <= TILT_DANGER_DEG:
@@ -593,56 +622,64 @@ def _multipart_body(fields, image_bytes):
     return b"".join(chunks), boundary
 
 
+def _snapshot_jpeg_bytes():
+    cached = cached_camera_frame()
+    if cached is not None:
+        return cached
+    if cv2 is None:
+        return None
+
+    camera = cv2.VideoCapture(CAMERA_INDEX)
+    try:
+        if not camera.isOpened():
+            return None
+        ok, frame = camera.read()
+        if not ok:
+            return None
+        ok, jpeg = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), CAMERA_JPEG_QUALITY],
+        )
+        return jpeg.tobytes() if ok else None
+    finally:
+        camera.release()
+
+
 def create_hazard_report(robot, source="SENSOR"):
-    """위험 사진과 센서 값을 서버에 보내 보호자 검토 대기 건을 만든다."""
+    """최신 카메라 프레임과 센서 값을 서버에 보내 검토 대기 건을 만든다."""
     if not HAZARD_URL:
         return
-    if cv2 is None:
-        log("위험 신고 생략: OpenCV(cv2)가 설치되어 있지 않습니다.")
-        return
 
-    # 여러 위험 이벤트가 겹쳐도 카메라는 한 작업만 사용한다.
     with hazard_report_lock:
-        camera = cv2.VideoCapture(CAMERA_INDEX)
+        image_bytes = _snapshot_jpeg_bytes()
+        if image_bytes is None:
+            log("위험 신고 생략: 카메라 프레임을 가져오지 못했습니다.")
+            return
+        fields = {
+            "robotId": ROBOT_ID,
+            "hazardType": "GENERAL_DANGER",
+            "detectedAt": datetime.now().astimezone().isoformat(),
+            "source": source,
+        }
         try:
-            if not camera.isOpened():
-                log("사진 촬영 실패: 카메라 {}을 열 수 없습니다.".format(CAMERA_INDEX))
-                return
-            ok, frame = camera.read()
-            if not ok:
-                log("사진 촬영 실패: 카메라 프레임을 읽지 못했습니다.")
-                return
-            ok, jpeg = cv2.imencode(
-                ".jpg",
-                frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), CAMERA_JPEG_QUALITY],
-            )
-            if not ok:
-                log("사진 촬영 실패: JPEG 변환에 실패했습니다.")
-                return
+            tilt = robot.tilt()
+            if tilt is not None:
+                fields["roll"] = tilt[0]
+                fields["pitch"] = tilt[1]
+        except Exception as error:
+            log("기울기 없이 신고를 전송합니다: {}".format(describe(error)))
 
-            fields = {
-                "robotId": ROBOT_ID,
-                "hazardType": "GENERAL_DANGER",
-                "detectedAt": datetime.now().astimezone().isoformat(),
-                "source": source,
-            }
-            try:
-                tilt = robot.tilt()
-                if tilt is not None:
-                    fields["roll"] = tilt[0]
-                    fields["pitch"] = tilt[1]
-            except Exception as error:
-                log("기울기 없이 신고를 전송합니다: {}".format(describe(error)))
-            body, boundary = _multipart_body(fields, jpeg.tobytes())
-            headers = {
-                "Content-Type": "multipart/form-data; boundary={}".format(boundary)
-            }
-            if DEVICE_TOKEN:
-                headers["X-Device-Token"] = DEVICE_TOKEN
-            request = urllib.request.Request(
-                HAZARD_URL, data=body, headers=headers, method="POST"
-            )
+        body, boundary = _multipart_body(fields, image_bytes)
+        headers = {
+            "Content-Type": "multipart/form-data; boundary={}".format(boundary)
+        }
+        if DEVICE_TOKEN:
+            headers["X-Device-Token"] = DEVICE_TOKEN
+        request = urllib.request.Request(
+            HAZARD_URL, data=body, headers=headers, method="POST"
+        )
+        try:
             with urllib.request.urlopen(
                 request, timeout=HTTP_TIMEOUT_SECONDS
             ) as response:
@@ -652,48 +689,31 @@ def create_hazard_report(robot, source="SENSOR"):
             log("위험 신고 전송 실패: {}".format(error))
         except Exception as error:
             log("위험 신고 처리 실패: {}".format(describe(error)))
-        finally:
-            camera.release()
 
 
 def upload_snapshot(event_type):
-    """별도 카메라 업로드 주소가 설정된 경우 이벤트 사진 한 장을 전송한다."""
+    """별도 업로드 주소가 설정된 경우 최신 카메라 프레임 한 장을 전송한다."""
     if not CAMERA_UPLOAD_URL:
         return
-    if cv2 is None:
-        log("사진 업로드 생략: OpenCV(cv2)가 설치되어 있지 않습니다.")
-        return
     with hazard_report_lock:
-        camera = cv2.VideoCapture(CAMERA_INDEX)
+        image_bytes = _snapshot_jpeg_bytes()
+        if image_bytes is None:
+            log("이벤트 사진 업로드 생략: 카메라 프레임을 가져오지 못했습니다.")
+            return
+        headers = {
+            "Content-Type": "image/jpeg",
+            "X-Event-Type": event_type,
+            "X-Robot-ID": ROBOT_ID,
+        }
+        if DEVICE_TOKEN:
+            headers["X-Device-Token"] = DEVICE_TOKEN
+        request = urllib.request.Request(
+            CAMERA_UPLOAD_URL,
+            data=image_bytes,
+            headers=headers,
+            method="POST",
+        )
         try:
-            if not camera.isOpened():
-                log("사진 촬영 실패: 카메라 {}을 열 수 없습니다.".format(CAMERA_INDEX))
-                return
-            ok, frame = camera.read()
-            if not ok:
-                log("사진 촬영 실패: 카메라 프레임을 읽지 못했습니다.")
-                return
-            ok, jpeg = cv2.imencode(
-                ".jpg",
-                frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), CAMERA_JPEG_QUALITY],
-            )
-            if not ok:
-                log("사진 촬영 실패: JPEG 변환에 실패했습니다.")
-                return
-            headers = {
-                "Content-Type": "image/jpeg",
-                "X-Event-Type": event_type,
-                "X-Robot-ID": ROBOT_ID,
-            }
-            if DEVICE_TOKEN:
-                headers["X-Device-Token"] = DEVICE_TOKEN
-            request = urllib.request.Request(
-                CAMERA_UPLOAD_URL,
-                data=jpeg.tobytes(),
-                headers=headers,
-                method="POST",
-            )
             with urllib.request.urlopen(
                 request, timeout=HTTP_TIMEOUT_SECONDS
             ) as response:
@@ -701,9 +721,105 @@ def upload_snapshot(event_type):
             log("이벤트 사진 전송 완료: {}".format(event_type))
         except (urllib.error.HTTPError, OSError, ValueError) as error:
             log("이벤트 사진 전송 실패: {}".format(error))
-        finally:
-            camera.release()
 
+class CameraStreamer(threading.Thread):
+    """OpenCV 카메라의 JPEG 프레임을 WebSocket으로 실시간 전송한다."""
+
+    def __init__(self):
+        super().__init__(daemon=True, name="camera-streamer")
+        self.problem = None
+
+    def run(self):
+        if not CAMERA_WS_URL:
+            log("카메라 스트리밍 비활성화: ROBODOG_CAMERA_WS_URL이 비어 있습니다.")
+            return
+        if cv2 is None:
+            log("카메라 스트리밍 비활성화: OpenCV(cv2)가 설치되어 있지 않습니다.")
+            return
+
+        while not stopping.is_set():
+            camera = self._open_camera()
+            if camera is None:
+                self._report("카메라 {}을 열 수 없습니다.".format(CAMERA_INDEX))
+                stopping.wait(RECONNECT_SECONDS)
+                continue
+            try:
+                self._stream(camera)
+            except Exception as error:
+                self._report("카메라 스트리밍 실패 ({})".format(describe(error)))
+            finally:
+                camera.release()
+            stopping.wait(RECONNECT_SECONDS)
+
+    def _open_camera(self):
+        if os.name == "nt" and hasattr(cv2, "CAP_DSHOW"):
+            camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+            if not camera.isOpened():
+                camera.release()
+                camera = cv2.VideoCapture(CAMERA_INDEX)
+        else:
+            camera = cv2.VideoCapture(CAMERA_INDEX)
+        if not camera.isOpened():
+            camera.release()
+            return None
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+        if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+            camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        log(
+            "카메라 연결: index={} {}x{} {}fps".format(
+                CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS
+            )
+        )
+        return camera
+
+    def _stream(self, camera):
+        headers = {"X-Device-Token": DEVICE_TOKEN} if DEVICE_TOKEN else None
+        interval = 1.0 / CAMERA_FPS
+        with connect(
+            CAMERA_WS_URL,
+            additional_headers=headers,
+            open_timeout=5,
+            close_timeout=2,
+            ping_interval=20,
+            ping_timeout=20,
+            max_size=None,
+        ) as connection:
+            self._report(None)
+            next_frame_at = time.monotonic()
+            while not stopping.is_set():
+                ok, frame = camera.read()
+                if not ok:
+                    raise OSError("카메라 프레임을 읽지 못했습니다.")
+                height, width = frame.shape[:2]
+                if width != CAMERA_WIDTH or height != CAMERA_HEIGHT:
+                    frame = cv2.resize(frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
+                ok, jpeg = cv2.imencode(
+                    ".jpg",
+                    frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), CAMERA_JPEG_QUALITY],
+                )
+                if not ok:
+                    raise OSError("카메라 프레임 JPEG 변환에 실패했습니다.")
+                payload = jpeg.tobytes()
+                store_camera_frame(payload)
+                connection.send(payload)
+
+                next_frame_at += interval
+                delay = next_frame_at - time.monotonic()
+                if delay > 0:
+                    stopping.wait(delay)
+                else:
+                    next_frame_at = time.monotonic()
+
+    def _report(self, problem):
+        if problem == self.problem:
+            return
+        if problem is None:
+            log("카메라 스트리밍 연결: {}".format(CAMERA_WS_URL))
+        else:
+            log(problem)
+        self.problem = problem
 
 class ServerLink:
     """명령 WebSocket을 유지하고 끊기면 정지 후 재접속한다."""
@@ -855,6 +971,7 @@ def main():
             EventSender(),
             TelemetrySender(robot),
             SafetyMonitor(robot, server_link),
+            CameraStreamer(),
         ]
         for thread in background_threads:
             thread.start()

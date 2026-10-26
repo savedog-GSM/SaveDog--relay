@@ -88,6 +88,7 @@ $env:ROBODOG_PORT="COM15"
 $env:ROBODOG_ID="robodog-01"
 $env:ROBODOG_DEFAULT_SPEED="15"
 $env:ROBODOG_CAMERA_INDEX="0"
+$env:ROBODOG_CAMERA_FPS="10"
 ```
 
 서버가 다른 컴퓨터에서 실행 중이라면 `localhost` 대신 서버 컴퓨터의 IP 주소를 사용합니다. `http://`는 붙이지 않습니다.
@@ -114,6 +115,7 @@ python .\robodog_relay.py
 로보독에 연결했습니다.
 QR 모드 응답: ...
 서버 연결: ws://localhost:8080/ws/robot
+카메라 스트리밍 연결: ws://localhost:8080/ws/camera/upload
 텔레메트리 전송 정상
 이벤트 전송 정상
 ```
@@ -131,8 +133,10 @@ QR 모드 응답: ...
 | `ROBODOG_DEFAULT_SPEED` | `50` | 기본 이동·회전 속도(0~100) |
 | `ROBODOG_LEG_BEND` | `60` | 시작 시 다리 굽힘 값(0~100) |
 | `ROBODOG_CAMERA_INDEX` | `0` | OpenCV 카메라 번호 |
-| `ROBODOG_CAMERA_JPEG_QUALITY` | `80` | 전송 이미지 JPEG 품질(1~100) |
-| `ROBODOG_QR_TURN_DEGREES` | `90` | QR 회전 각도 |
+| `ROBODOG_CAMERA_JPEG_QUALITY` | `70` | 실시간 프레임 JPEG 품질(1~100) |
+| `ROBODOG_CAMERA_FPS` | `10` | 카메라 전송 FPS(최대 30) |
+| `ROBODOG_CAMERA_WIDTH` | `640` | 전송 프레임 너비 |
+| `ROBODOG_CAMERA_HEIGHT` | `480` | 전송 프레임 높이 |
 | `ROBODOG_DISTANCE_WARNING_CM` | `50` | 거리 경고 기준(cm) |
 | `ROBODOG_DISTANCE_DANGER_CM` | `20` | 거리 위험 기준(cm) |
 | `ROBODOG_TILT_WARNING_DEG` | `15` | 기울기 경고 기준(도) |
@@ -141,7 +145,6 @@ QR 모드 응답: ...
 | `ROBODOG_SAFETY_INTERVAL` | `0.05` | 안전 센서 확인 간격(초) |
 | `ROBODOG_TILT_INTERVAL` | `1.0` | 텔레메트리 전송 간격(초) |
 | `ROBODOG_RECONNECT_SECONDS` | `5.0` | 서버 재연결 대기 시간(초) |
-| `ROBODOG_HAZARD_COOLDOWN` | `300` | 동일 QR 위험 신고 후보 재생성 제한(초) |
 | `ROBODOG_BARK_COOLDOWN` | `5.0` | 경고음 최소 간격(초) |
 
 처음 실제 장비를 시험할 때는 `ROBODOG_DEFAULT_SPEED=15`처럼 낮은 값으로 시작하는 것을 권장합니다.
@@ -157,6 +160,7 @@ QR 모드 응답: ...
 | `ROBODOG_HAZARD_URL` | `http://<SERVER>/api/robot/hazards` |
 | `ROBODOG_WS_URL` | `ws://<SERVER>/ws/robot` |
 | `ROBODOG_CAMERA_URL` | 미설정(선택 기능) |
+| `ROBODOG_CAMERA_WS_URL` | `ws://<SERVER>/ws/camera/upload` |
 
 ## 서버 인터페이스
 
@@ -165,6 +169,7 @@ QR 모드 응답: ...
 | 중계 → 서버 | HTTP POST | `/api/robot/telemetry` | 센서값·상태·위험도 전송 |
 | 중계 → 서버 | HTTP POST | `/api/robot/events` | QR·명령·안전 이벤트 전송 |
 | 중계 → 서버 | HTTP multipart POST | `/api/robot/hazards` | 위험 사진과 신고 후보 생성 |
+| 중계 → 서버 | WebSocket binary | `/ws/camera/upload` | 10 FPS JPEG 카메라 프레임 전송 |
 | 서버 → 중계 | WebSocket | `/ws/robot` | 로봇 제어 명령 전송 |
 
 WebSocket 명령은 JSON 객체로 전송합니다.
