@@ -36,7 +36,7 @@ except ImportError:
 
 
 SERVER = os.getenv("ROBODOG_SERVER", "savedog.https.gsmsv.site").strip()
-DEVICE_TOKEN = "d8ea5a1949aedf113f5f618b47d6ad0ee8da51bef9598b09"
+DEVICE_TOKEN = os.getenv("DEVICE_API_TOKEN", "").strip()
 ROBODOG_PORT = os.getenv("ROBODOG_PORT", "").strip() or None
 DEFAULT_SPEED = int(os.getenv("ROBODOG_DEFAULT_SPEED", "50"))
 LEG_BEND = int(os.getenv("ROBODOG_LEG_BEND", "60"))
