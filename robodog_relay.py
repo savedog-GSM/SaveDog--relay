@@ -1,17 +1,3 @@
-# 실행 전 확인 체크리스트
-# 1) Thonny Python에 kocoafab_robodog, websockets, opencv-python이 설치되어 있는지 확인한다.
-# 2) 로보독 전원·블루투스 동글·카메라를 연결하고 ROBODOG_PORT와 ROBODOG_CAMERA_INDEX를 확인한다.
-# 3) ROBODOG_SERVER를 실제 서버 주소(예: 192.168.0.10:8080)로 설정한다. 주소에 http://를 붙이지 않는다.
-# 4) 서버 인증을 사용하면 DEVICE_API_TOKEN을 설정하고 서버의 X-Device-Token 값과 일치하는지 확인한다.
-# 5) 서버가 /ws/robot, /api/robot/telemetry, /api/robot/events, /api/robot/hazards를 제공하는지 확인한다.
-# 6) /api/robot/hazards가 multipart의 image, robotId, hazardType, detectedAt, source, roll, pitch를 받는지 확인한다.
-# 7) 스마트폰 GPS가 같은 ROBODOG_ID로 서버에 전송되고 서버가 최신 위치를 위험 신고와 결합하는지 확인한다.
-# 8) 보호자 웹에서 위험 위치·사진 확인, 승인·거절, 모의 접수 상태가 표시되는지 확인한다.
-# 9) 실제 장비에서 전진 방향, 좌우 회전(LEFT_SPIN/RIGHT_SPIN), 속도, 회전 각도, 경고음을 안전하게 보정한다.
-# 10) 거리·기울기 위험 감지 시 정지·잠금·경고음·사진 전송을 시험하고 resume 전에는 이동하지 않는지 확인한다.
-# 11) 실제 정부 민원 자동 제출은 하지 않으며 보호자 승인 후 서버의 모의 신고 기능만 사용한다.
-# 12) 거리·기울기 안전 기준과 연속 감지 횟수를 실제 장비에서 보수적으로 조정한다.
-
 """로보독 블루투스 동글과 Spring Boot 서버를 연결하는 PC 중계 프로그램."""
 
 from kocoafab_robodog import *
@@ -75,8 +61,6 @@ BARK_THEME = int(os.getenv("ROBODOG_BARK_THEME", "0"))
 BARK_TRACK = int(os.getenv("ROBODOG_BARK_TRACK", "1"))
 BARK_VOLUME = int(os.getenv("ROBODOG_BARK_VOLUME", "100"))
 BARK_COOLDOWN_SECONDS = float(os.getenv("ROBODOG_BARK_COOLDOWN", "5.0"))
-
-# 실제 회전 방향이 반대라면 두 값을 서로 바꾼다.
 LEFT_SPIN = CCW
 RIGHT_SPIN = CW
 
@@ -231,7 +215,6 @@ class Robot:
         update_runtime(robotState=TURNING, speed=speed)
 
     def rotate(self, direction, degrees, speed):
-        # rotate()는 완료까지 기다리므로 외부 잠금을 오래 잡지 않는다.
         self.stop()
         update_runtime(robotState=TURNING, speed=speed)
         self.dog.rotate(direction, degrees, speed)
@@ -908,8 +891,6 @@ class ServerLink:
             self.send_result(command.get("commandId"), result)
             queue_event("COMMAND_REJECTED", commandType=kind, reason="sensor_danger")
             return
-
-        # 일반 정지는 현재 동작만 멈춘다. 비상 정지는 RESUME 전까지 이동을 막는다.
         if kind in {"STOP", "EMERGENCY_STOP"}:
             self.worker.clear()
             if kind == "EMERGENCY_STOP":
