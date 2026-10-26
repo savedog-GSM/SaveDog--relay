@@ -4,11 +4,11 @@
 # 3) ROBODOG_SERVER를 실제 서버 주소(예: 192.168.0.10:8080)로 설정한다. 주소에 http://를 붙이지 않는다.
 # 4) 서버 인증을 사용하면 DEVICE_API_TOKEN을 설정하고 서버의 X-Device-Token 값과 일치하는지 확인한다.
 # 5) 서버가 /ws/robot, /api/robot/telemetry, /api/robot/events, /api/robot/hazards를 제공하는지 확인한다.
-# 6) /api/robot/hazards가 multipart의 image, robotId, hazardType, detectedAt, source, qrCode, roll, pitch를 받는지 확인한다.
+# 6) /api/robot/hazards가 multipart의 image, robotId, hazardType, detectedAt, source, roll, pitch를 받는지 확인한다.
 # 7) 스마트폰 GPS가 같은 ROBODOG_ID로 서버에 전송되고 서버가 최신 위치를 위험 신고와 결합하는지 확인한다.
 # 8) 보호자 웹에서 위험 위치·사진 확인, 승인·거절, 모의 접수 상태가 표시되는지 확인한다.
 # 9) 실제 장비에서 전진 방향, 좌우 회전(LEFT_SPIN/RIGHT_SPIN), 속도, 회전 각도, 경고음을 안전하게 보정한다.
-# 10) warning/fire/ground QR로 정지·잠금·경고음·사진 전송을 시험하고 resume 전에는 이동하지 않는지 확인한다.
+# 10) 거리·기울기 위험 감지 시 정지·잠금·경고음·사진 전송을 시험하고 resume 전에는 이동하지 않는지 확인한다.
 # 11) 실제 정부 민원 자동 제출은 하지 않으며 보호자 승인 후 서버의 모의 신고 기능만 사용한다.
 # 12) 거리·기울기 안전 기준과 연속 감지 횟수를 실제 장비에서 보수적으로 조정한다.
 
@@ -35,8 +35,8 @@ except ImportError:
     cv2 = None
 
 
-SERVER = os.getenv("ROBODOG_SERVER", "localhost:8080").strip()
-DEVICE_TOKEN = os.getenv("DEVICE_API_TOKEN", "").strip()
+SERVER = os.getenv("ROBODOG_SERVER", "savedog.https.gsmsv.site").strip()
+DEVICE_TOKEN = "d8ea5a1949aedf113f5f618b47d6ad0ee8da51bef9598b09"
 ROBODOG_PORT = os.getenv("ROBODOG_PORT", "").strip() or None
 DEFAULT_SPEED = int(os.getenv("ROBODOG_DEFAULT_SPEED", "50"))
 LEG_BEND = int(os.getenv("ROBODOG_LEG_BEND", "60"))
@@ -45,23 +45,21 @@ SAFETY_INTERVAL_SECONDS = float(os.getenv("ROBODOG_SAFETY_INTERVAL", "0.05"))
 RECONNECT_SECONDS = float(os.getenv("ROBODOG_RECONNECT_SECONDS", "5.0"))
 HTTP_TIMEOUT_SECONDS = float(os.getenv("ROBODOG_HTTP_TIMEOUT", "3.0"))
 EVENT_URL = os.getenv(
-    "ROBODOG_EVENT_URL", "http://{}/api/robot/events".format(SERVER)
+    "ROBODOG_EVENT_URL", "https://{}/api/robot/events".format(SERVER)
 ).strip()
 HAZARD_URL = os.getenv(
-    "ROBODOG_HAZARD_URL", "http://{}/api/robot/hazards".format(SERVER)
+    "ROBODOG_HAZARD_URL", "https://{}/api/robot/hazards".format(SERVER)
 ).strip()
 CAMERA_UPLOAD_URL = os.getenv("ROBODOG_CAMERA_URL", "").strip()
 TELEMETRY_URL = os.getenv(
-    "ROBODOG_TELEMETRY_URL", "http://{}/api/robot/telemetry".format(SERVER)
+    "ROBODOG_TELEMETRY_URL", "https://{}/api/robot/telemetry".format(SERVER)
 ).strip()
 COMMAND_WS_URL = os.getenv(
-    "ROBODOG_WS_URL", "ws://{}/ws/robot".format(SERVER)
+    "ROBODOG_WS_URL", "wss://{}/ws/robot".format(SERVER)
 ).strip()
 ROBOT_ID = os.getenv("ROBODOG_ID", "robodog-01").strip()
 CAMERA_INDEX = int(os.getenv("ROBODOG_CAMERA_INDEX", "0"))
 CAMERA_JPEG_QUALITY = int(os.getenv("ROBODOG_CAMERA_JPEG_QUALITY", "80"))
-HAZARD_COOLDOWN_SECONDS = float(os.getenv("ROBODOG_HAZARD_COOLDOWN", "300"))
-QR_TURN_DEGREES = float(os.getenv("ROBODOG_QR_TURN_DEGREES", "90"))
 DISTANCE_WARNING_CM = float(os.getenv("ROBODOG_DISTANCE_WARNING_CM", "50"))
 DISTANCE_DANGER_CM = float(os.getenv("ROBODOG_DISTANCE_DANGER_CM", "20"))
 TILT_WARNING_DEG = float(os.getenv("ROBODOG_TILT_WARNING_DEG", "15"))
@@ -87,44 +85,11 @@ SUPPORTED_COMMANDS = {
     "TURN_RIGHT",
 }
 
-QR_COMMANDS = {
-    "start": [{"type": "FORWARD"}],
-    "stop": [{"type": "EMERGENCY_STOP"}],
-    "resume": [{"type": "RESUME"}],
-    "left": [
-        {"type": "STOP"},
-        {"type": "TURN_LEFT", "degrees": QR_TURN_DEGREES},
-        {"type": "FORWARD"},
-    ],
-    "right": [
-        {"type": "STOP"},
-        {"type": "TURN_RIGHT", "degrees": QR_TURN_DEGREES},
-        {"type": "FORWARD"},
-    ],
-    "warning": [{"type": "EMERGENCY_STOP"}, {"type": "BARK"}],
-    "fire": [{"type": "EMERGENCY_STOP"}, {"type": "BARK"}],
-    "ground": [{"type": "EMERGENCY_STOP"}, {"type": "BARK"}],
-    "reroute": [{"type": "STOP"}],
-    "cross": [{"type": "STOP"}],
-    "arrive": [{"type": "EMERGENCY_STOP"}],
-    "report": [],
-}
-
-HAZARD_TYPES = {
-    "warning": "GENERAL_DANGER",
-    "fire": "FIRE",
-    "ground": "GROUND_DAMAGE",
-    "report": "GENERAL_DANGER",
-    "sensor": "GENERAL_DANGER",
-}
-
 IDLE = "IDLE"
 MOVING = "MOVING"
 STOPPED = "STOPPED"
 TURNING = "TURNING"
 HAZARD = "HAZARD"
-REROUTING = "REROUTING"
-ARRIVED = "ARRIVED"
 
 stopping = threading.Event()
 movement_locked = threading.Event()
@@ -135,7 +100,6 @@ event_queue = queue.Queue()
 runtime_state = {
     "robotState": IDLE,
     "speed": 0,
-    "lastQrCode": None,
     "websocketConnected": False,
     "riskLevel": "safe",
     "riskScore": 0,
@@ -169,7 +133,6 @@ def queue_event(event_type, **details):
         "robotId": ROBOT_ID,
         "robotState": snapshot["robotState"],
         "speed": snapshot["speed"],
-        "qrCode": snapshot["lastQrCode"],
         "riskLevel": snapshot["riskLevel"],
         "riskScore": snapshot["riskScore"],
         "riskReason": snapshot["riskReason"],
@@ -198,10 +161,6 @@ def validate_settings():
         HTTP_TIMEOUT_SECONDS,
     ) <= 0:
         raise ValueError("시간 관련 설정은 0보다 커야 합니다.")
-    if HAZARD_COOLDOWN_SECONDS < 0:
-        raise ValueError("ROBODOG_HAZARD_COOLDOWN은 0 이상이어야 합니다.")
-    if not 0 < QR_TURN_DEGREES <= 360:
-        raise ValueError("ROBODOG_QR_TURN_DEGREES는 0~360 범위여야 합니다.")
     if not 1 <= CAMERA_JPEG_QUALITY <= 100:
         raise ValueError("ROBODOG_CAMERA_JPEG_QUALITY는 1~100 범위여야 합니다.")
     if not 0 < DISTANCE_DANGER_CM <= DISTANCE_WARNING_CM:
@@ -291,10 +250,6 @@ class Robot:
             "roll": None if tilt is None else tilt[0],
             "pitch": None if tilt is None else tilt[1],
         }
-
-    def qr_code(self):
-        with self.lock:
-            return self.dog.get_qrcode()
 
 
 class CommandWorker(threading.Thread):
@@ -426,7 +381,6 @@ class TelemetrySender(threading.Thread):
                 "robotId": ROBOT_ID,
                 "robotState": snapshot["robotState"],
                 "speed": snapshot["speed"],
-                "lastQrCode": snapshot["lastQrCode"],
                 "websocketConnected": snapshot["websocketConnected"],
                 "sensor": sensors,
                 "risk": {
@@ -465,7 +419,7 @@ class TelemetrySender(threading.Thread):
 
 
 class EventSender(threading.Thread):
-    """제어·QR·안전 이벤트를 큐에서 꺼내 서버로 전송한다."""
+    """제어·안전 이벤트를 큐에서 꺼내 서버로 전송한다."""
 
     def __init__(self):
         super().__init__(daemon=True, name="event-sender")
@@ -587,8 +541,7 @@ class SafetyMonitor(threading.Thread):
         )
         threading.Thread(
             target=create_hazard_report,
-            args=("sensor", self.robot),
-            kwargs={"source": "SENSOR"},
+            args=(self.robot,),
             daemon=True,
             name="sensor-hazard-report",
         ).start()
@@ -609,14 +562,6 @@ class SafetyMonitor(threading.Thread):
             log("안전 센서 확인 정상")
         self.problem = problem
 
-
-def send_qr_event(qr_code, commands):
-    """보호자 웹이 상태를 갱신할 수 있도록 QR 인식 이벤트를 서버에 알린다."""
-    queue_event(
-        "QR_DETECTED",
-        qrCode=qr_code,
-        commands=[command["type"] for command in commands],
-    )
 
 
 def _multipart_body(fields, image_bytes):
@@ -648,7 +593,7 @@ def _multipart_body(fields, image_bytes):
     return b"".join(chunks), boundary
 
 
-def create_hazard_report(qr_code, robot, source="QR_DEMO"):
+def create_hazard_report(robot, source="SENSOR"):
     """위험 사진과 센서 값을 서버에 보내 보호자 검토 대기 건을 만든다."""
     if not HAZARD_URL:
         return
@@ -678,10 +623,9 @@ def create_hazard_report(qr_code, robot, source="QR_DEMO"):
 
             fields = {
                 "robotId": ROBOT_ID,
-                "hazardType": HAZARD_TYPES[qr_code],
+                "hazardType": "GENERAL_DANGER",
                 "detectedAt": datetime.now().astimezone().isoformat(),
                 "source": source,
-                "qrCode": qr_code,
             }
             try:
                 tilt = robot.tilt()
@@ -703,7 +647,7 @@ def create_hazard_report(qr_code, robot, source="QR_DEMO"):
                 request, timeout=HTTP_TIMEOUT_SECONDS
             ) as response:
                 response_body = response.read().decode("utf-8", errors="replace")
-            log("위험 신고 후보 생성: {} {}".format(qr_code, response_body))
+            log("센서 위험 신고 후보 생성: {}".format(response_body))
         except (urllib.error.HTTPError, OSError, KeyError, ValueError) as error:
             log("위험 신고 전송 실패: {}".format(error))
         except Exception as error:
@@ -759,78 +703,6 @@ def upload_snapshot(event_type):
             log("이벤트 사진 전송 실패: {}".format(error))
         finally:
             camera.release()
-
-
-class QRReader(threading.Thread):
-    """QR을 읽어 서버 명령과 같은 형식으로 중계 프로그램에 전달한다."""
-
-    def __init__(self, robot, server_link):
-        super().__init__(daemon=True, name="qr-reader")
-        self.robot = robot
-        self.server_link = server_link
-        self.last_hazard_at = {}
-
-    def run(self):
-        handled_qr = None
-        missing_count = 0
-        while not stopping.is_set():
-            try:
-                qr_code = self.robot.qr_code()
-            except Exception as error:
-                log("QR 읽기 실패: {}".format(describe(error)))
-                stopping.wait(0.5)
-                continue
-
-            if qr_code:
-                qr_code = str(qr_code).strip().lower()
-                update_runtime(lastQrCode=qr_code)
-                missing_count = 0
-                if qr_code != handled_qr:
-                    handled_qr = qr_code
-                    commands = QR_COMMANDS.get(qr_code)
-                    if commands is None:
-                        log("지원하지 않는 QR: {}".format(qr_code))
-                        send_qr_event(qr_code, [])
-                    else:
-                        log("QR 인식: {}".format(qr_code))
-                        for command in commands:
-                            self.server_link.submit(command)
-                        if qr_code == "arrive":
-                            update_runtime(robotState=ARRIVED)
-                        elif qr_code == "reroute":
-                            update_runtime(robotState=REROUTING)
-                        send_qr_event(qr_code, commands)
-                        if qr_code in HAZARD_TYPES:
-                            now = time.monotonic()
-                            last = self.last_hazard_at.get(qr_code, float("-inf"))
-                            if now - last >= HAZARD_COOLDOWN_SECONDS:
-                                self.last_hazard_at[qr_code] = now
-                                threading.Thread(
-                                    target=create_hazard_report,
-                                    args=(qr_code, self.server_link.robot),
-                                    daemon=True,
-                                    name="hazard-report-{}".format(qr_code),
-                                ).start()
-                            else:
-                                log("중복 위험 신고 생략: {}".format(qr_code))
-                        if CAMERA_UPLOAD_URL and qr_code in {
-                            "warning",
-                            "fire",
-                            "ground",
-                            "arrive",
-                            "report",
-                        }:
-                            threading.Thread(
-                                target=upload_snapshot,
-                                args=("qr_{}".format(qr_code),),
-                                daemon=True,
-                                name="snapshot-{}".format(qr_code),
-                            ).start()
-            else:
-                missing_count += 1
-                if missing_count >= 10:
-                    handled_qr = None
-            stopping.wait(0.05)
 
 
 class ServerLink:
@@ -901,7 +773,7 @@ class ServerLink:
         self.submit(command)
 
     def submit(self, command):
-        """서버와 QR이 공통으로 사용하는 명령 진입점."""
+        """서버 명령을 검증하고 실행 대기열에 넣는다."""
         kind = str(command.get("type", "")).upper()
         command = dict(command)
         command["type"] = kind
@@ -914,12 +786,6 @@ class ServerLink:
 
         motion_kinds = {"FORWARD", "BACKWARD", "TURN_LEFT", "TURN_RIGHT", "RESUME"}
         snapshot = runtime_snapshot()
-        if kind in motion_kinds and snapshot["robotState"] == ARRIVED:
-            result = "RuntimeError: 도착 상태에서는 다시 출발할 수 없습니다."
-            log(result)
-            self.send_result(command.get("commandId"), result)
-            queue_event("COMMAND_REJECTED", commandType=kind, reason="arrived")
-            return
         if kind in motion_kinds and snapshot["riskLevel"] == "danger":
             result = "RuntimeError: 센서 위험 상태에서는 이동할 수 없습니다."
             log(result)
@@ -970,6 +836,7 @@ class ServerLink:
 
 
 def main():
+    log("인증 토큰 설정됨: {}".format(bool(DEVICE_TOKEN)))
     validate_settings()
     dog = RoboDog()
     background_threads = []
@@ -981,8 +848,6 @@ def main():
     log("로보독에 연결했습니다.")
     robot = Robot(dog)
     try:
-        mode_response = dog.ai_mode(QRCODE_READ, timeout=5.0)
-        log("QR 모드 응답: {}".format(mode_response))
         dog.leg_bend(ALL_LEG, LEG_BEND)
         server_link = ServerLink(robot)
         update_runtime(robotState=IDLE, speed=0)
@@ -990,7 +855,6 @@ def main():
             EventSender(),
             TelemetrySender(robot),
             SafetyMonitor(robot, server_link),
-            QRReader(robot, server_link),
         ]
         for thread in background_threads:
             thread.start()
